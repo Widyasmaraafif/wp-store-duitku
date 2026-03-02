@@ -5,7 +5,7 @@ Ekstensi pembayaran Duitku Gateway untuk plugin **WP Store**. Ekstensi ini memun
 ## Fitur
 - Integrasi mulus dengan halaman pengaturan WP Store.
 - Mendukung mode Sandbox (Testing) dan Production (Live).
-- Pengalihan otomatis ke halaman pembayaran Duitku setelah checkout.
+- Pembayaran via Pop-up (Duitku Pop) otomatis setelah checkout.
 - Update status pesanan otomatis via Callback/IPN (Instant Payment Notification).
 - Pencatatan status pembayaran pada meta pesanan.
 
