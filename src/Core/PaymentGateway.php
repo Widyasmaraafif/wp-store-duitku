@@ -4,100 +4,97 @@ namespace WP_Store_Duitku\Core;
 class PaymentGateway {
     public function __construct() {
         add_filter('wp_store_allowed_payment_methods', array($this, 'allow_duitku'));
-        add_filter('wp_store_payment_init', array($this, 'handle_payment_init'), 10, 4);
-        add_action('wp_enqueue_scripts', array($this, 'enqueue_scripts'));
-        add_action('wp_footer', array($this, 'render_popup_script'));
-    }
-
-    public function enqueue_scripts() {
-        if (!is_singular('page')) return;
-        
-        $settings = get_option('wp_store_settings', []);
-        $mode = $settings['duitku_mode'] ?? 'sandbox';
-        $js_url = ($mode === 'production') 
-            ? 'https://app-prod.duitku.com/lib/js/duitku.js'
-            : 'https://app-sandbox.duitku.com/lib/js/duitku.js';
-            
-        wp_enqueue_script('duitku-pop', $js_url, [], null, true);
-    }
-
-    public function render_popup_script() {
-        $order_number = isset($_GET['order']) ? sanitize_text_field($_GET['order']) : '';
-        if (!$order_number) return;
-
-        $orders = get_posts([
-            'post_type' => 'store_order',
-            'meta_key' => '_store_order_number',
-            'meta_value' => $order_number,
-            'posts_per_page' => 1,
-            'fields' => 'ids'
-        ]);
-
-        if (empty($orders)) {
-            // Try by ID
-            if (is_numeric($order_number)) {
-                $order_id = (int) $order_number;
-                if (get_post_type($order_id) !== 'store_order') {
-                    return;
-                }
-            } else {
-                return;
-            }
-        } else {
-            $order_id = $orders[0];
-        }
-
-        $payment_method = get_post_meta($order_id, '_store_order_payment_method', true);
-        if ($payment_method !== 'duitku') return;
-
-        $status = get_post_meta($order_id, '_store_order_status', true);
-        if ($status !== 'awaiting_payment') return;
-
-        $payment_token = get_post_meta($order_id, '_store_order_payment_token', true);
-        if (!$payment_token) return;
-
-        ?>
-        <script>
-            document.addEventListener('DOMContentLoaded', function() {
-                if (typeof checkout !== 'undefined') {
-                    // Function to trigger Duitku Pop
-                    window.triggerDuitkuPop = function() {
-                        checkout.process("<?php echo esc_js($payment_token); ?>", {
-                            successEvent: function(result) {
-                                window.location.reload();
-                            },
-                            pendingEvent: function(result) {
-                                window.location.reload();
-                            },
-                            errorEvent: function(result) {
-                                console.error('Duitku Error:', result);
-                            },
-                            closeEvent: function(result) {
-                                console.log('Duitku Closed');
-                            }
-                        });
-                    };
-
-                    // Auto trigger on load
-                    triggerDuitkuPop();
-
-                    // Try to add a button if possible
-                    const paymentInfo = document.querySelector('.wps-container .wps-grid div:last-child');
-                    if (paymentInfo) {
-                        const btnContainer = document.createElement('div');
-                        btnContainer.style.marginTop = '20px';
-                        btnContainer.innerHTML = '<button type="button" class="wps-btn wps-btn-primary wps-w-full" onclick="triggerDuitkuPop()">Bayar Sekarang (Duitku Pop)</button>';
-                        paymentInfo.appendChild(btnContainer);
-                    }
-                }
-            });
-        </script>
-        <?php
+        add_filter('wp_store_payment_init', array($this, 'handle_payment_init'), 10, 5);
+        add_filter('wp_store_payment_response', array($this, 'remove_redirect_from_response'), 10, 4);
+        add_action('wp_enqueue_scripts', array($this, 'enqueue_duitku_scripts'));
+        add_action('wp_footer', array($this, 'maybe_render_duitku_popup'));
     }
 
     public function allow_duitku($methods) {
         $methods[] = 'duitku';
         return $methods;
+    }
+
+    public function remove_redirect_from_response($resp, $order_id, $payment_info, $data) {
+        $payment_method = get_post_meta($order_id, '_store_order_payment_method', true);
+        if ($payment_method === 'duitku' && isset($resp['payment_url'])) {
+            unset($resp['payment_url']);
+        }
+        return $resp;
+    }
+
+    public function enqueue_duitku_scripts() {
+        $settings = get_option('wp_store_settings', []);
+        $page_thanks_id = (int) ($settings['page_thanks'] ?? 0);
+
+        if ($page_thanks_id > 0 && is_page($page_thanks_id)) {
+            $mode = $settings['duitku_mode'] ?? 'sandbox';
+            $js_url = ($mode === 'production') 
+                ? 'https://passport.duitku.com/webapi/js/duitku.js'
+                : 'https://sandbox.duitku.com/webapi/js/duitku.js';
+            
+            wp_enqueue_script('duitku-js', $js_url, array(), null, true);
+        }
+    }
+
+    public function maybe_render_duitku_popup() {
+        $settings = get_option('wp_store_settings', []);
+        $page_thanks_id = (int) ($settings['page_thanks'] ?? 0);
+
+        if ($page_thanks_id > 0 && is_page($page_thanks_id)) {
+            $order_param = isset($_GET['order']) ? sanitize_text_field($_GET['order']) : '';
+            if (!$order_param) return;
+
+            // Resolve order ID
+            $order_id = 0;
+            $orders = get_posts([
+                'post_type' => 'store_order',
+                'meta_key' => '_store_order_number',
+                'meta_value' => $order_param,
+                'posts_per_page' => 1,
+                'fields' => 'ids'
+            ]);
+
+            if (!empty($orders)) {
+                $order_id = $orders[0];
+            } elseif (is_numeric($order_param)) {
+                $order_id = absint($order_param);
+            }
+
+            if ($order_id > 0 && get_post_type($order_id) === 'store_order') {
+                $payment_method = get_post_meta($order_id, '_store_order_payment_method', true);
+                $payment_url = get_post_meta($order_id, '_store_order_payment_url', true);
+                $status = get_post_meta($order_id, '_store_order_status', true);
+
+                if ($payment_method === 'duitku' && !empty($payment_url) && $status === 'awaiting_payment') {
+                    ?>
+                    <script type="text/javascript">
+                        document.addEventListener('DOMContentLoaded', function() {
+                            if (typeof checkout !== 'undefined') {
+                                checkout.process('<?php echo esc_js($payment_url); ?>', {
+                                    successEvent: function(result) {
+                                        console.log('success', result);
+                                        window.location.reload();
+                                    },
+                                    pendingEvent: function(result) {
+                                        console.log('pending', result);
+                                        window.location.reload();
+                                    },
+                                    errorEvent: function(result) {
+                                        console.log('error', result);
+                                        window.location.reload();
+                                    },
+                                    closeEvent: function(result) {
+                                        console.log('customer closed the popup', result);
+                                    }
+                                });
+                            }
+                        });
+                    </script>
+                    <?php
+                }
+            }
+        }
     }
 
     public function handle_payment_init($info, $order_id, $payment_method, $data, $order_total) {
