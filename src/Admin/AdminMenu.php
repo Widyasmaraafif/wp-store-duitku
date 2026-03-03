@@ -33,9 +33,9 @@ class AdminMenu {
 
     public function register_history_menu() {
         add_submenu_page(
-            'edit.php?post_type=store_order',
+            'wp-store',
             'Duitku History',
-            'Duitku History',
+            'Duitku',
             'manage_options',
             'duitku-history',
             array($this, 'render_history_page')
@@ -97,7 +97,7 @@ class AdminMenu {
                 </div>
             </div>
             <div class="wp-store-mt-4">
-                <a href="<?php echo admin_url('edit.php?post_type=store_order&page=duitku-history'); ?>" class="button button-secondary">Lihat Riwayat Transaksi Duitku</a>
+                <a href="<?php echo admin_url('admin.php?page=duitku-history'); ?>" class="button button-secondary">Lihat Riwayat Transaksi Duitku</a>
             </div>
         </div>
         <?php
