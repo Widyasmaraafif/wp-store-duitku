@@ -2,7 +2,14 @@
 namespace WP_Store_Duitku\Core;
 
 class PaymentGateway {
+    private $db;
+
     public function __construct() {
+        $this->db = new Database();
+        
+        // Create tables on init if needed
+        add_action('init', [$this->db, 'create_tables']);
+
         add_filter('wp_store_allowed_payment_methods', array($this, 'allow_duitku'));
         add_filter('wp_store_payment_init', array($this, 'handle_payment_init'), 10, 5);
         add_filter('wp_store_payment_response', array($this, 'remove_redirect_from_response'), 10, 4);
@@ -30,8 +37,8 @@ class PaymentGateway {
         if ($page_thanks_id > 0 && is_page($page_thanks_id)) {
             $mode = $settings['duitku_mode'] ?? 'sandbox';
             $js_url = ($mode === 'production') 
-                ? 'https://passport.duitku.com/webapi/js/duitku.js'
-                : 'https://sandbox.duitku.com/webapi/js/duitku.js';
+                ? 'https://app-prod.duitku.com/lib/js/duitku.js'
+                : 'https://app-sandbox.duitku.com/lib/js/duitku.js';
             
             wp_enqueue_script('duitku-js', $js_url, array(), null, true);
         }
@@ -63,15 +70,16 @@ class PaymentGateway {
 
             if ($order_id > 0 && get_post_type($order_id) === 'store_order') {
                 $payment_method = get_post_meta($order_id, '_store_order_payment_method', true);
-                $payment_url = get_post_meta($order_id, '_store_order_payment_url', true);
+                $reference = get_post_meta($order_id, '_store_order_payment_token', true);
                 $status = get_post_meta($order_id, '_store_order_status', true);
 
-                if ($payment_method === 'duitku' && !empty($payment_url) && $status === 'awaiting_payment') {
+                if ($payment_method === 'duitku' && !empty($reference) && $status === 'awaiting_payment') {
                     ?>
                     <script type="text/javascript">
                         document.addEventListener('DOMContentLoaded', function() {
                             if (typeof checkout !== 'undefined') {
-                                checkout.process('<?php echo esc_js($payment_url); ?>', {
+                                checkout.process('<?php echo esc_js($reference); ?>', {
+                                    defaultLanguage: "id",
                                     successEvent: function(result) {
                                         console.log('success', result);
                                         window.location.reload();
@@ -113,6 +121,9 @@ class PaymentGateway {
 
         $order_number = get_post_meta($order_id, '_store_order_number', true) ?: (string) $order_id;
         $amount = (int) $order_total;
+        
+        // Jakarta timezone timestamp in milliseconds
+        date_default_timezone_set('Asia/Jakarta');
         $timestamp = round(microtime(true) * 1000);
         
         $signature = hash('sha256', $merchant_code . $timestamp . $api_key);
@@ -131,29 +142,42 @@ class PaymentGateway {
             ];
         }
 
-        $payload = [
-            'merchantCode' => $merchant_code,
-            'paymentAmount' => $amount,
-            'merchantOrderId' => $order_number,
-            'productDetails' => 'Order ' . $order_number,
-            'email' => get_post_meta($order_id, '_store_order_email', true),
-            'phoneNumber' => get_post_meta($order_id, '_store_order_phone', true),
-            'itemDetails' => $item_details,
-            'callbackUrl' => $callback_url,
-            'returnUrl' => $return_url,
-            'signature' => hash('sha256', $merchant_code . $order_number . $amount . $api_key),
-            'expiryPeriod' => 1440 // 24 hours
+        $customer_name = get_post_meta($order_id, '_store_order_first_name', true) . ' ' . get_post_meta($order_id, '_store_order_last_name', true);
+
+        $params = [
+            'paymentAmount'    => $amount,
+            'merchantOrderId'  => $order_number,
+            'productDetails'   => 'Order ' . $order_number,
+            'additionalParam'  => '',
+            'merchantUserInfo' => '',
+            'customerVaName'   => $customer_name,
+            'email'            => get_post_meta($order_id, '_store_order_email', true),
+            'phoneNumber'      => get_post_meta($order_id, '_store_order_phone', true),
+            'itemDetails'      => $item_details,
+            'callbackUrl'      => $callback_url,
+            'returnUrl'        => $return_url,
+            'customerDetail'   => [
+                'firstName' => get_post_meta($order_id, '_store_order_first_name', true),
+                'lastName'  => get_post_meta($order_id, '_store_order_last_name', true),
+                'email'     => get_post_meta($order_id, '_store_order_email', true),
+                'phoneNumber' => get_post_meta($order_id, '_store_order_phone', true),
+            ]
         ];
 
         $url = ($mode === 'production') 
-            ? 'https://passport.duitku.com/webapi/api/merchant/v2/inquiry'
-            : 'https://sandbox.duitku.com/webapi/api/merchant/v2/inquiry';
+            ? 'https://api-prod.duitku.com/api/merchant/createinvoice'
+            : 'https://api-sandbox.duitku.com/api/merchant/createinvoice';
 
         $response = wp_remote_post($url, [
+            'method'    => 'POST',
             'headers' => [
-                'Content-Type' => 'application/json',
+                'Accept'                => 'application/json',
+                'Content-Type'          => 'application/json',
+                'x-duitku-signature'    => $signature,
+                'x-duitku-timestamp'    => $timestamp,
+                'x-duitku-merchantcode' => $merchant_code,
             ],
-            'body' => json_encode($payload),
+            'body' => json_encode($params),
             'timeout' => 30
         ]);
 
@@ -161,11 +185,19 @@ class PaymentGateway {
             return $info;
         }
 
+        $http_code = wp_remote_retrieve_response_code($response);
         $body = json_decode(wp_remote_retrieve_body($response), true);
 
-        if (isset($body['paymentUrl'])) {
-            $info['payment_url'] = $body['paymentUrl'];
-            $info['payment_token'] = $body['reference'] ?? '';
+        if ($http_code === 200 && isset($body['reference'])) {
+            $info['payment_url'] = $body['paymentUrl'] ?? '';
+            $info['payment_token'] = $body['reference'];
+            
+            // Save to database logging
+            $this->db->save_invoice($order_number, $body, $amount);
+            
+            // Update order meta
+            update_post_meta($order_id, '_store_order_payment_url', $info['payment_url']);
+            update_post_meta($order_id, '_store_order_payment_token', $info['payment_token']);
         }
 
         return $info;
