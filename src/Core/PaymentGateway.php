@@ -26,8 +26,9 @@ class PaymentGateway {
     public function enqueue_duitku_scripts() {
         $settings = get_option('wp_store_settings', []);
         $page_thanks_id = (int) ($settings['page_thanks'] ?? 0);
+        $is_thanks_page = ($page_thanks_id > 0 && is_page($page_thanks_id)) || (isset($_GET['order']) && !empty($_GET['order']));
 
-        if ($page_thanks_id > 0 && is_page($page_thanks_id)) {
+        if ($is_thanks_page) {
             $mode = $settings['duitku_mode'] ?? 'sandbox';
             $js_url = ($mode === 'production') 
                 ? 'https://passport.duitku.com/webapi/js/duitku.js'
@@ -40,8 +41,9 @@ class PaymentGateway {
     public function maybe_render_duitku_popup() {
         $settings = get_option('wp_store_settings', []);
         $page_thanks_id = (int) ($settings['page_thanks'] ?? 0);
+        $is_thanks_page = ($page_thanks_id > 0 && is_page($page_thanks_id)) || (isset($_GET['order']) && !empty($_GET['order']));
 
-        if ($page_thanks_id > 0 && is_page($page_thanks_id)) {
+        if ($is_thanks_page) {
             $order_param = isset($_GET['order']) ? sanitize_text_field($_GET['order']) : '';
             if (!$order_param) return;
 
@@ -52,7 +54,8 @@ class PaymentGateway {
                 'meta_key' => '_store_order_number',
                 'meta_value' => $order_param,
                 'posts_per_page' => 1,
-                'fields' => 'ids'
+                'fields' => 'ids',
+                'post_status' => 'any'
             ]);
 
             if (!empty($orders)) {
@@ -69,25 +72,29 @@ class PaymentGateway {
                 if ($payment_method === 'duitku' && !empty($payment_url) && $status === 'awaiting_payment') {
                     ?>
                     <script type="text/javascript">
-                        document.addEventListener('DOMContentLoaded', function() {
+                        window.addEventListener('load', function() {
+                            console.log('Duitku: Checking for popup trigger...');
                             if (typeof checkout !== 'undefined') {
+                                console.log('Duitku: Triggering popup for <?php echo esc_js($payment_url); ?>');
                                 checkout.process('<?php echo esc_js($payment_url); ?>', {
                                     successEvent: function(result) {
-                                        console.log('success', result);
+                                        console.log('Duitku success', result);
                                         window.location.reload();
                                     },
                                     pendingEvent: function(result) {
-                                        console.log('pending', result);
+                                        console.log('Duitku pending', result);
                                         window.location.reload();
                                     },
                                     errorEvent: function(result) {
-                                        console.log('error', result);
+                                        console.log('Duitku error', result);
                                         window.location.reload();
                                     },
                                     closeEvent: function(result) {
-                                        console.log('customer closed the popup', result);
+                                        console.log('Duitku customer closed the popup', result);
                                     }
                                 });
+                            } else {
+                                console.error('Duitku: SDK (checkout object) not found!');
                             }
                         });
                     </script>
