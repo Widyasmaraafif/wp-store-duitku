@@ -55,9 +55,20 @@ class PaymentGateway {
             // Resolve order ID
             $order_id = 0;
             $orders = get_posts([
-                'post_type' => 'store_order',
-                'meta_key' => '_store_order_number',
-                'meta_value' => $order_param,
+                'post_type' => ['store_order', 'event_order'],
+                'meta_query' => [
+                    'relation' => 'OR',
+                    [
+                        'key' => '_store_order_number',
+                        'value' => $order_param,
+                        'compare' => '='
+                    ],
+                    [
+                        'key' => 'invoice_number',
+                        'value' => $order_param,
+                        'compare' => '='
+                    ]
+                ],
                 'posts_per_page' => 1,
                 'fields' => 'ids'
             ]);
@@ -68,12 +79,15 @@ class PaymentGateway {
                 $order_id = absint($order_param);
             }
 
-            if ($order_id > 0 && get_post_type($order_id) === 'store_order') {
-                $payment_method = get_post_meta($order_id, '_store_order_payment_method', true);
-                $reference = get_post_meta($order_id, '_store_order_payment_token', true);
-                $status = get_post_meta($order_id, '_store_order_status', true);
+            if ($order_id > 0 && in_array(get_post_type($order_id), ['store_order', 'event_order'])) {
+                $post_type = get_post_type($order_id);
+                $payment_method = get_post_meta($order_id, ($post_type === 'event_order' ? 'payment_method' : '_store_order_payment_method'), true);
+                $reference = get_post_meta($order_id, ($post_type === 'event_order' ? 'payment_token' : '_store_order_payment_token'), true);
+                $status = get_post_meta($order_id, ($post_type === 'event_order' ? 'order_status' : '_store_order_status'), true);
+                
+                $is_awaiting = ($post_type === 'event_order') ? ($status === 'pending') : ($status === 'awaiting_payment');
 
-                if ($payment_method === 'duitku' && !empty($reference) && $status === 'awaiting_payment') {
+                if ($payment_method === 'duitku' && !empty($reference) && $is_awaiting) {
                     ?>
                     <script type="text/javascript">
                         document.addEventListener('DOMContentLoaded', function() {
