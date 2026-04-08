@@ -48,9 +48,14 @@ class PaymentGateway {
         $settings = get_option('wp_store_settings', []);
         $page_thanks_id = (int) ($settings['page_thanks'] ?? 0);
 
+        // If we're on the thanks page, the button handles the trigger.
+        // We only use this for other order types that don't have a button, like event_order or membership.
         if ($page_thanks_id > 0 && is_page($page_thanks_id)) {
-            $order_param = isset($_GET['order']) ? sanitize_text_field($_GET['order']) : '';
-            if (!$order_param) return;
+            return;
+        }
+
+        $order_param = isset($_GET['order']) ? sanitize_text_field($_GET['order']) : '';
+        if (!$order_param) return;
 
             // Resolve order ID
             $order_id = 0;
@@ -116,7 +121,6 @@ class PaymentGateway {
                     <?php
                 }
             }
-        }
     }
 
     public function handle_payment_init($info, $order_id, $payment_method, $data, $order_total) {
@@ -175,6 +179,9 @@ class PaymentGateway {
             $first_name = get_post_meta($order_id, '_store_order_first_name', true);
             $last_name = get_post_meta($order_id, '_store_order_last_name', true);
             $customer_name = trim($first_name . ' ' . $last_name);
+            if (empty($customer_name)) {
+                $customer_name = get_post_meta($order_id, '_store_order_name', true) ?: 'Customer';
+            }
             $email = get_post_meta($order_id, '_store_order_email', true);
             $phone = get_post_meta($order_id, '_store_order_phone', true);
 
@@ -188,6 +195,30 @@ class PaymentGateway {
                     'quantity' => (int) $item['qty']
                 ];
             }
+
+            // Add Shipping cost as an item
+            $shipping_cost = (int) get_post_meta($order_id, '_store_order_shipping_cost', true);
+            if ($shipping_cost > 0) {
+                $item_details[] = [
+                    'name' => 'Shipping Cost',
+                    'price' => $shipping_cost,
+                    'quantity' => 1
+                ];
+            }
+
+            // Add Discount as an item (negative price)
+            $discount_amount = (int) get_post_meta($order_id, '_store_order_discount_amount', true);
+            if ($discount_amount > 0) {
+                $item_details[] = [
+                    'name' => 'Discount',
+                    'price' => -$discount_amount,
+                    'quantity' => 1
+                ];
+            }
+        }
+            
+        if (empty($first_name)) {
+            $first_name = $customer_name;
         }
 
         $amount = (int) $order_total;
@@ -275,6 +306,8 @@ class PaymentGateway {
             } else {
                 update_post_meta($order_id, '_store_order_payment_url', $info['payment_url']);
                 update_post_meta($order_id, '_store_order_payment_token', $info['payment_token']);
+                update_post_meta($order_id, 'duitku_reference', $info['payment_token']);
+                update_post_meta($order_id, 'payment_token', $info['payment_token']);
             }
 
         return $info;
