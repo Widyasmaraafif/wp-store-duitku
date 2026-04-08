@@ -133,7 +133,63 @@ class PaymentGateway {
             return $info;
         }
 
-        $order_number = get_post_meta($order_id, '_store_order_number', true) ?: (string) $order_id;
+        $post_type = get_post_type($order_id);
+
+        if ($post_type === 'event_order') {
+            $order_number = get_post_meta($order_id, 'invoice_number', true) ?: (string) $order_id;
+            $customer_name = get_post_meta($order_id, 'full_name', true);
+            $email = get_post_meta($order_id, 'email', true);
+            $phone = get_post_meta($order_id, 'phone', true);
+            
+            $event_id = get_post_meta($order_id, 'event_id', true);
+            $quantity = max(1, (int)get_post_meta($order_id, 'quantity', true));
+            
+            $item_details = [
+                [
+                    'name' => get_the_title($event_id) ?: 'Event Ticket',
+                    'price' => (int) ($order_total / $quantity),
+                    'quantity' => $quantity
+                ]
+            ];
+            
+            $first_name = $customer_name;
+            $last_name = '';
+        } elseif ($post_type === 'membership') {
+            $order_number = get_post_meta($order_id, 'invoice_number', true) ?: (string) $order_id;
+            $customer_name = get_the_title($order_id);
+            $email = get_post_meta($order_id, 'email', true);
+            $phone = get_post_meta($order_id, 'phone', true);
+            
+            $item_details = [
+                [
+                    'name' => 'Membership: ' . $customer_name,
+                    'price' => (int) $order_total,
+                    'quantity' => 1
+                ]
+            ];
+            
+            $first_name = $customer_name;
+            $last_name = '';
+        } else {
+            $order_number = get_post_meta($order_id, '_store_order_number', true) ?: (string) $order_id;
+            $first_name = get_post_meta($order_id, '_store_order_first_name', true);
+            $last_name = get_post_meta($order_id, '_store_order_last_name', true);
+            $customer_name = trim($first_name . ' ' . $last_name);
+            $email = get_post_meta($order_id, '_store_order_email', true);
+            $phone = get_post_meta($order_id, '_store_order_phone', true);
+
+            // Prepare items
+            $items_meta = get_post_meta($order_id, '_store_order_items', true) ?: [];
+            $item_details = [];
+            foreach ($items_meta as $item) {
+                $item_details[] = [
+                    'name' => $item['title'],
+                    'price' => (int) $item['price'],
+                    'quantity' => (int) $item['qty']
+                ];
+            }
+        }
+
         $amount = (int) $order_total;
         
         // Jakarta timezone timestamp in milliseconds
@@ -143,20 +199,15 @@ class PaymentGateway {
         $signature = hash('sha256', $merchant_code . $timestamp . $api_key);
 
         $callback_url = rest_url('wp-store/v1/duitku/callback');
-        $return_url = home_url('/thanks/?order=' . $order_number);
-
-        // Prepare items
-        $items_meta = get_post_meta($order_id, '_store_order_items', true) ?: [];
-        $item_details = [];
-        foreach ($items_meta as $item) {
-            $item_details[] = [
-                'name' => $item['title'],
-                'price' => (int) $item['price'],
-                'quantity' => (int) $item['qty']
-            ];
+        if ($post_type === 'event_order') {
+            $callback_url = rest_url('custom-plugin/v1/duitku/callback');
+            $return_url = home_url('/invoice/?order_id=' . $order_id);
+        } elseif ($post_type === 'membership') {
+            $callback_url = rest_url('custom-plugin/v1/memberships/duitku/callback');
+            $return_url = home_url('/membership-invoice/?membership_id=' . $order_id);
+        } else {
+            $return_url = home_url('/thanks/?order=' . $order_number);
         }
-
-        $customer_name = get_post_meta($order_id, '_store_order_first_name', true) . ' ' . get_post_meta($order_id, '_store_order_last_name', true);
 
         $params = [
             'paymentAmount'    => $amount,
@@ -165,16 +216,16 @@ class PaymentGateway {
             'additionalParam'  => '',
             'merchantUserInfo' => '',
             'customerVaName'   => $customer_name,
-            'email'            => get_post_meta($order_id, '_store_order_email', true),
-            'phoneNumber'      => get_post_meta($order_id, '_store_order_phone', true),
+            'email'            => $email,
+            'phoneNumber'      => $phone,
             'itemDetails'      => $item_details,
             'callbackUrl'      => $callback_url,
             'returnUrl'        => $return_url,
             'customerDetail'   => [
-                'firstName' => get_post_meta($order_id, '_store_order_first_name', true),
-                'lastName'  => get_post_meta($order_id, '_store_order_last_name', true),
-                'email'     => get_post_meta($order_id, '_store_order_email', true),
-                'phoneNumber' => get_post_meta($order_id, '_store_order_phone', true),
+                'firstName' => $first_name,
+                'lastName'  => $last_name,
+                'email'     => $email,
+                'phoneNumber' => $phone,
             ]
         ];
 
@@ -196,13 +247,18 @@ class PaymentGateway {
         ]);
 
         if (is_wp_error($response)) {
+            error_log('Duitku API Request Error: ' . $response->get_error_message());
             return $info;
         }
 
         $http_code = wp_remote_retrieve_response_code($response);
-        $body = json_decode(wp_remote_retrieve_body($response), true);
+        $body_raw = wp_remote_retrieve_body($response);
+        $body = json_decode($body_raw, true);
 
-        if ($http_code === 200 && isset($body['reference'])) {
+        if ($http_code !== 200 || !isset($body['reference'])) {
+            error_log('Duitku API Response Error (HTTP ' . $http_code . '): ' . $body_raw);
+            return $info;
+        }
             $info['payment_url'] = $body['paymentUrl'] ?? '';
             $info['payment_token'] = $body['reference'];
             
@@ -210,9 +266,16 @@ class PaymentGateway {
             $this->db->save_invoice($order_number, $body, $amount);
             
             // Update order meta
-            update_post_meta($order_id, '_store_order_payment_url', $info['payment_url']);
-            update_post_meta($order_id, '_store_order_payment_token', $info['payment_token']);
-        }
+            if ($post_type === 'event_order') {
+                update_post_meta($order_id, 'duitku_reference', $info['payment_token']);
+                update_post_meta($order_id, 'payment_token', $info['payment_token']);
+            } elseif ($post_type === 'membership') {
+                update_post_meta($order_id, 'duitku_reference', $info['payment_token']);
+                update_post_meta($order_id, 'payment_token', $info['payment_token']);
+            } else {
+                update_post_meta($order_id, '_store_order_payment_url', $info['payment_url']);
+                update_post_meta($order_id, '_store_order_payment_token', $info['payment_token']);
+            }
 
         return $info;
     }
